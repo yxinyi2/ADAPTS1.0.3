@@ -807,6 +807,11 @@ shrinkSigMatrix <- function(sigMatrix, numChunks=100, verbose=FALSE, plotIt=FALS
     message('fastStop==TRUE overwriting aggressiveMin option.')
     aggressiveMin <- TRUE #The logic is getting convoluted.  Please refactor
   }
+  else{
+    if(is.null(numChunks) || numChunks > nrow(sigMatrix)-1 ){
+      numChunks<-nrow(sigMatrix)-1
+    }
+  }
   
   if(is.null(sigGenesList)) {
     sigGenesList <- shrinkByKappa(sigMatrix=sigMatrix, numChunks=numChunks, verbose=verbose, plotIt=plotIt, singleCore=singleCore, fastStop=fastStop)
