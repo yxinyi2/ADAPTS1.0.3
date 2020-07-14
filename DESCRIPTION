@@ -23,11 +23,8 @@ Depends: R (>= 3.3.0)
 biocViews:
 Imports: missForest, e1071, WGCNA, ComICS, pheatmap, doParallel,
         quantmod, preprocessCore, pcaMethods, foreach, DeconRNASeq,
-        nnls,mclust,ranger, ADAPTSdata3
-Suggests: 
-    R.rsp,
-    knitr,
-    rmarkdown
-VignetteBuilder: knitr
+        nnls, ranger
+Suggests: R.rsp
+VignetteBuilder: R.rsp
 NeedsCompilation: no
 Packaged: 2019-09-07 02:33:21 UTC; sdanziger
