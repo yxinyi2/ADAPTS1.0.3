@@ -1,0 +1,303 @@
+---
+title: "loop"
+author: "Xinyi Yan"
+date: "7/31/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(ADAPTS)
+library(ADAPTSdata3)
+library(pheatmap)
+library(parallel)
+library(ranger)
+doParallel::registerDoParallel(cores = parallel::detectCores())
+```
+
+```{r}
+normalData <- log(ADAPTSdata3::normalData.5061+1)
+toy<-normalData[1:2000,1:15]
+```
+
+```{r LoadHandCluster}
+loadHandClusters <- function() {
+  metaList <- list()
+  metaList[[1]] <- c('Cluster_0')  #DuctalCellType 2 
+  metaList[[2]] <- c('Cluster_1', 'Cluster_9', 'Cluster_11')  #DuctalCellType 1 
+  metaList[[3]] <- c('Cluster_2', 'Cluster_13', 'Cluster_14')  #Endothelial 
+  metaList[[4]] <- c('Cluster_3', 'Cluster_5', 'Cluster_12')  #Stellate_Fibroblast 
+  metaList[[5]] <- c('Cluster_4')  #Macrophage 
+  metaList[[6]] <- c('Cluster_6')  #TCell
+  metaList[[7]] <- c('Cluster_7')  #BCell
+  metaList[[8]] <- c('Cluster_8')  #Acinar
+  metaList[[9]] <- c('Cluster_10')  #PlasmaCell
+  return(metaList)
+}
+```
+
+```{r}
+scMatrixTest<-function(toy, randomize = TRUE, skipShrink=FALSE, handMetaCluster=FALSE) {
+
+  if(randomize==TRUE) {set.seed(Sys.time())}
+  resList <- list()
+  
+  trainTestSet <- ADAPTS::splitSCdata(toy, numSets=2, randomize = randomize)
+  trainSet <- trainTestSet[[1]]
+  testSet <-trainTestSet[[2]]
+  
+  trainSet.30sam <- ADAPTS::scSample(RNAcounts = trainSet, groupSize = 30, randomize = randomize)
+  trainSet.3sam <- ADAPTS::scSample(RNAcounts = trainSet, groupSize = 3, randomize = randomize)
+  
+  pseudobulk.test <- data.frame(test=rowSums(testSet))
+  pseudobulk.test.counts<-table(sub('\\..*','',colnames(testSet)))
+  actFrac.test <- 100 * pseudobulk.test.counts / sum(pseudobulk.test.counts)
+  
+  
+  #seed
+  genesInSeed<-100
+  seedMat <- ADAPTS::buildSeed(trainSet, genesInSeed=genesInSeed, groupSize=30, randomize=TRUE, num.trees=1000, plotIt=FALSE, trainSet.3sam=trainSet.3sam, trainSet.30sam=trainSet.30sam)
+  resList[['matrix.seed']] <- seedMat
+  
+  estimates.onTest <- as.data.frame(ADAPTS::estCellPercent.DCQ(seedMat, pseudobulk.test))
+  
+  colnames(estimates.onTest) <- paste(genesInSeed, 'Marker Genes Seed')
+  estimates.onTest$actFrac.test <- round(actFrac.test[rownames(estimates.onTest)],2)
+  resList[['estimates.onTest']] <- estimates.onTest
+  
+  resList[['testAcc.seed']] <- seed2TestAcc <- ADAPTS::calcAcc(estimates=estimates.onTest[,1], reference=estimates.onTest[,2])
+  
+  
+  #All gene
+  allGeneSig <- apply(trainSet.3sam, 1, function(x){tapply(x, colnames(trainSet.3sam), mean, na.rm=TRUE)})
+  
+  estimates.allGene <- as.data.frame(ADAPTS::estCellPercent.DCQ(t(allGeneSig), pseudobulk.test))
+  colnames(estimates.allGene)<-'All Gene Matrix'
+  
+  estimates.onTest<-cbind(estimates.allGene,estimates.onTest)
+  resList[['estimates.onTest']] <- estimates.onTest
+  
+  resList[['testAcc.all']] <- seed2TestAcc <-  ADAPTS::calcAcc(estimates=estimates.onTest[,1],reference=estimates.onTest[,ncol(estimates.onTest)])
+  
+  
+  # Aug
+  gList <- ADAPTS::gListFromRF(trainSet=trainSet.30sam)
+ 
+  augTrain <- ADAPTS::AugmentSigMatrix(origMatrix = seedMat, fullData = trainSet.3sam, gList = gList, nGenes = 1:100, newData = trainSet.3sam, plotToPDF = FALSE, pdfDir = '.')
+  
+  resList[['matrix.aug']] <- augTrain
+  
+  estimates.augment <- as.data.frame(ADAPTS::estCellPercent.DCQ(augTrain, pseudobulk.test))
+  colnames(estimates.augment) <- paste('Augmented Matrix')
+  estimates.onTest <- cbind(estimates.augment, estimates.onTest)
+  resList[['estimates.onTest']] <- estimates.onTest
+  
+  resList[['testAcc.aug']] <- seed2TestAcc <- calcAcc(estimates=estimates.onTest[,1], reference=estimates.onTest[,ncol(estimates.onTest)])
+  seed2TestAcc
+  
+  #shrink
+  if(skipShrink == FALSE) {
+    augTrain.shrink <- ADAPTS::shrinkSigMatrix(sigMatrix=augTrain, numChunks=NULL, verbose=FALSE, plotIt = TRUE, aggressiveMin=TRUE,sigGenesList=NULL, fastStop=TRUE, singleCore=TRUE)
+    pheatmap(augTrain.shrink)
+    resList[['matrix.shrink']] <- augTrain.shrink
+    
+    estimates.shrink <- as.data.frame(ADAPTS::estCellPercent.DCQ(augTrain.shrink, pseudobulk.test))
+    colnames(estimates.shrink) <- paste('Shrunk Matrix')
+    resList[['estimates.onTest']] <- estimates.onTest <- cbind(estimates.shrink, estimates.onTest)
+    
+    resList[['testAcc.shrink']] <- seed2TestAcc<- calcAcc(estimates=estimates.onTest[,1], reference=estimates.onTest[,ncol(estimates.onTest)])}
+    
+  
+    #Clustering
+    varClusts <- ADAPTS::clustWspillOver(sigMatrix = seedMat, geneExpr = trainSet.3sam)
+    
+    if(handMetaCluster==TRUE) {
+      resList[['allClusters']]  <- loadHandClusters()
+    } else {
+      resList[['allClusters']]  <- varClusts$allClusters
+    }
+    
+    metaCluster.id <- list()
+    for(i in 1:length(varClusts$allClusters)) {
+      for (x in varClusts$allClusters[[i]]) {
+        metaCluster.id[[x]] <- paste('Meta',i,sep='_')
+      }
+    }
+    metaClust.LUT <- resList[['metaClust.LUT']]  <- unlist(metaCluster.id)
+    
+    metatrainSet<-trainSet
+    metatestSet<-testSet
+    
+    colnames(metatrainSet) <- metaClust.LUT[sub('\\..*','',colnames(metatrainSet))]
+    colnames(metatestSet) <- metaClust.LUT[sub('\\..*','',colnames(metatestSet))]
+    
+    metatrainSet.3sam <- ADAPTS::scSample(RNAcounts = metatrainSet, groupSize = 3, randomize = TRUE)
+    metatrainSet.30sam <- ADAPTS::scSample(RNAcounts = metatrainSet, groupSize = 30, randomize = TRUE)
+    
+    metaclusterIDs <- factor(colnames(metatrainSet.30sam))
+    metatrainSet.4reg <- t(metatrainSet.30sam)
+    
+    metapseudobulk.test <- data.frame(test=rowSums(metatestSet))
+    metapseudobulk.test.counts <- table(sub('\\..*','',colnames(metatestSet)))
+    meta.actFrac <- 100 * metapseudobulk.test.counts / sum(metapseudobulk.test.counts)
+    
+    #Metaseed
+    genesInSeed<-100
+    metaseedMat <- ADAPTS::buildSeed(metatrainSet, genesInSeed=genesInSeed, groupSize=30, randomize=TRUE, num.trees=1000, plotIt=FALSE, trainSet.3sam=metatrainSet.3sam, trainSet.30sam=metatrainSet.30sam)
+    
+    resList[['matrix.meta']] <- metaseedMat
+    
+    estimates.Meta.onTest <- as.data.frame(ADAPTS::estCellPercent.DCQ(metaseedMat, metapseudobulk.test))
+    
+    colnames(estimates.Meta.onTest) <- paste(genesInSeed, 'Marker Genes Seed')
+    estimates.Meta.onTest$actFrac.test <- round(meta.actFrac[rownames(estimates.Meta.onTest)],2)
+    
+    resList[['estimates.onTest.meta']] <- estimates.Meta.onTest
+    
+    resList[['testAcc.meta']] <- seed2TestAcc.meta <- ADAPTS::calcAcc(estimates=estimates.Meta.onTest[,1], reference=estimates.Meta.onTest[,2])
+
+    
+    #meta all gene
+    metaallGeneSig <- apply(metatrainSet.3sam, 1, function(x){tapply(x, colnames(metatrainSet.3sam), mean, na.rm=TRUE)})
+    metaestimates.allGene <- as.data.frame(ADAPTS::estCellPercent.DCQ(t(metaallGeneSig), metapseudobulk.test))
+    colnames(metaestimates.allGene)<-paste('All Gene Meta')
+    estimates.Meta.onTest <- cbind(metaestimates.allGene, estimates.Meta.onTest)
+    resList[['estimates.onTest.meta']] <- estimates.Meta.onTest
+    
+    resList[['testAcc.metaAll']] <- seed2TestAcc <- ADAPTS::calcAcc(estimates=estimates.Meta.onTest[,1], reference=estimates.Meta.onTest[,ncol(estimates.Meta.onTest)])
+    
+    #meta aug
+    metagList <- ADAPTS::gListFromRF(trainSet=metatrainSet.30sam)
+    sapply(gList,dim)
+    
+    meta.augTrain <- ADAPTS::AugmentSigMatrix(origMatrix = metaseedMat, fullData = metatrainSet.3sam, gList = metagList, nGenes = 1:100, newData = metatrainSet.3sam, plotToPDF = FALSE, pdfDir = '.')
+    
+    resList[['matrix.metaAug']] <- meta.augTrain
+    
+    estimates.Meta.augment <- as.data.frame(ADAPTS::estCellPercent.DCQ(meta.augTrain, metapseudobulk.test))
+    colnames(estimates.Meta.augment) <- paste('Augmented Meta')
+    resList[['estimates.onTest.meta']] <- estimates.Meta.onTest <- cbind(estimates.Meta.augment, estimates.Meta.onTest)
+    
+    resList[['testAcc.metaAug']] <- seed2TestAcc.aug.meta <- ADAPTS::calcAcc(estimates=estimates.Meta.onTest[,1], reference=estimates.Meta.onTest[,ncol(estimates.Meta.onTest)])
+    
+    #meta shrink
+    if(skipShrink == FALSE) {
+      gc()
+      meta.augTrain.shrink <- ADAPTS::shrinkSigMatrix(sigMatrix=meta.augTrain, numChunks=NULL, verbose=FALSE, plotIt = TRUE, aggressiveMin=TRUE, sigGenesList=NULL,fastStop=TRUE, singleCore=TRUE)
+      dim(meta.augTrain.shrink)
+      pheatmap(augTrain.shrink)
+      resList[['matrix.metaAugShrink']] <- meta.augTrain.shrink
+      
+      estimates.Meta.shrink <- as.data.frame(ADAPTS::estCellPercent.DCQ(meta.augTrain.shrink, metapseudobulk.test))
+      colnames(estimates.Meta.shrink) <- paste('Shrunk Meta')
+      resList[['estimates.onTest.meta']] <- estimates.Meta.onTest <- cbind(estimates.Meta.shrink, estimates.Meta.onTest)
+      
+      resList[['testAcc.metaAugShrink']] <- seed2TestAcc.shrink.meta <- ADAPTS::calcAcc(estimates=estimates.Meta.onTest[,1], reference=estimates.Meta.onTest[,ncol(estimates.Meta.onTest)])
+
+    }
+    
+    return(resList)
+}
+  
+```
+
+
+```{r}
+findConvergenceIter <- function(curSeq, changePer=1, winSize=5) {
+  
+  #Note, this will remove NAs.  Is that best?  They're caused by bad correlations
+  runMean <- sapply(1:length(curSeq), function(x) {sum(curSeq[1:x], na.rm=TRUE)/x})
+      #Criteria: running mean has changed less than 5% in the last 5? point
+  convIter <- as.numeric(NA)
+  if (length(runMean) > winSize) {
+    winOffset <- winSize-1
+    maxWinChange <- sapply(winSize:length(runMean), function(x) {
+      win <- runMean[(x-winOffset):x]
+      max(abs((win - mean(win))/mean(win)))
+    }) #maxWinChange
+    mwcBool <- maxWinChange < changePer/100
+    if(any(mwcBool)) {convIter <- winOffset + which(mwcBool)[1]}
+  }
+  return (convIter)
+}
+```
+
+
+```{r metaAnalysis}
+metaAnalysis <- function (allResList,converg) {
+  testNames <- unique(sub('^.*\\.', '', names(allResList[[1]])))
+  testNames <- testNames[!testNames %in% c("onTest", "allClusters", "LUT")]
+  compTypes <- names(allResList[[1]][[paste0('testAcc.', testNames[1])]])
+  
+  allResList <- allResList[!sapply(allResList, function(x){inherits(x,'try-error')})]
+  
+  compList <- list()
+  for (curName in testNames) {
+    compList[[curName]] <- list()
+    for (curComp in compTypes) {
+      compList[[curName]][[curComp]] <- sapply(allResList, function(x){ 
+        y <- x[[paste0('testAcc.', curName)]]
+        if(!inherits(y, 'try-error')) {return(y[[curComp]])} else {return(as.numeric(NA))}  
+        #If only two clusters, set correlation to zero or NA?
+      }) #compList[[curName]][[curComp]] <- sapply(allResList, function(x){ 
+    } #for (curComp in compTypes) {
+  } #for (curName in testNames) {
+  
+  curColN <- unlist(lapply(compTypes, function(x){c(x, paste0(x,'.sd'))}))
+  resMat <- matrix(as.numeric(NA), nrow=length(testNames), ncol=length(curColN),
+                   dimnames=list(testNames, curColN))
+  convMat <- matrix(as.numeric(NA), nrow=length(testNames), ncol=length(compTypes),
+                   dimnames=list(testNames, compTypes))
+  for (curName in testNames) {
+    for (curComp in compTypes) {
+      curMean <- mean(compList[[curName]][[curComp]], na.rm = TRUE)
+      curSD <- sd(compList[[curName]][[curComp]], na.rm = TRUE)
+      resMat[curName,curComp] <- curMean
+      resMat[curName,paste0(curComp,'.sd')] <- curSD
+      
+      #Also test for convergence by % of change with each additional
+      convMat[curName, curComp] <- findConvergenceIter(curSeq=compList[[curName]][[curComp]], changePer=1, winSize=5)
+      
+    } #for (curComp in compTypes) {
+  } #for (curName in testNames) {
+  colnames(convMat) <- paste0('convIt.',colnames(convMat))
+  
+  resMat <- as.data.frame(resMat)
+  resMat$N <- length(allResList)
+  resMat <- cbind(resMat, as.data.frame(convMat))
+  
+  if(converg==TRUE){
+    return(convMat)
+  }else{
+    
+  return(resMat)}
+}
+```
+
+```{r  runTheLoops}
+numLoops<-5
+handMetaCluster<-FALSE
+allResListOut <- list()
+outFile <- paste('toy', numLoops,Sys.Date(), 'RData', sep='.')
+if(handMetaCluster==TRUE) {
+  outFile <- sub('\\.RData$', '.handMeta.RData', outFile)
+}
+for (i in 1:numLoops) {
+  curName <- paste0('res', i)
+  allResListOut[[curName]] <- try(scMatrixTest(toy, randomize = TRUE, handMetaCluster=FALSE))
+  save(allResListOut, file=outFile, compress='xz', version=2)
+}
+```
+
+```{r anaTheLoops}
+allResListOut <- get(load(outFile)[1])
+meta <- metaAnalysis(allResListOut,converg = FALSE)
+round(meta, 2)
+#write.csv(meta, file=paste('scPDAC4', numLoops, alpha, proportional, Sys.Date(), 'csv', sep='.'))
+write.csv(meta, file=sub('\\.RData$', '.csv', outFile))
+```
+
+```
