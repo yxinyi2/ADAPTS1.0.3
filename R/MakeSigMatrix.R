@@ -814,7 +814,7 @@ shrinkSigMatrix <- function(sigMatrix, numChunks=100, verbose=FALSE, plotIt=FALS
   }
   
   if(is.null(sigGenesList)) {
-    sigGenesList <- shrinkByKappa(sigMatrix=sigMatrix, numChunks=numChunks, verbose=verbose, plotIt=plotIt, singleCore=singleCore, fastStop=fastStop)
+    sigGenesList <- shrinkByKappa(sigMatrix=sigMatrix, numChunks=numChunks, verbose=verbose, plotIt=FALSE, singleCore=singleCore, fastStop=fastStop)
   }
   
   kappas <- sapply(sigGenesList, function(x){x$condNum})
